@@ -4,8 +4,15 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { refreshCachedRecords, scanAllSessions } from "../src/scan";
 
-function writeSessionFile(baseDir: string, projectDir: string, filename: string, lines: Array<Record<string, unknown> | string>) {
-	const dir = join(baseDir, "sessions", projectDir);
+function writeSessionFile(baseDir: string, relativeDir: string, filename: string, lines: Array<Record<string, unknown> | string>) {
+	const dir = join(baseDir, "sessions", relativeDir);
+	mkdirSync(dir, { recursive: true });
+	const content = lines.map((line) => (typeof line === "string" ? line : JSON.stringify(line))).join("\n");
+	writeFileSync(join(dir, filename), `${content}\n`, "utf-8");
+}
+
+function writeRootSessionFile(baseDir: string, filename: string, lines: Array<Record<string, unknown> | string>) {
+	const dir = join(baseDir, "sessions");
 	mkdirSync(dir, { recursive: true });
 	const content = lines.map((line) => (typeof line === "string" ? line : JSON.stringify(line))).join("\n");
 	writeFileSync(join(dir, filename), `${content}\n`, "utf-8");
@@ -29,12 +36,32 @@ describe("scanAllSessions", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("parses assistant usage records, uses session cwd, deduplicates, and sorts chronologically", () => {
+	it("parses root and nested session files, uses session cwd, deduplicates by entry id, and sorts chronologically", () => {
+		writeRootSessionFile(tempDir, "2026-04-02T13-54-08-857Z_root-session.jsonl", [
+			{ type: "session", cwd: "/Users/test/root-project" },
+			{
+				type: "message",
+				id: "root-msg-1",
+				timestamp: "2026-04-02T09:58:00.000Z",
+				message: {
+					role: "assistant",
+					provider: "openai-codex",
+					model: "gpt-5.4",
+					usage: {
+						input: 5,
+						output: 7,
+						cost: { total: 0.02 },
+					},
+				},
+			},
+		]);
+
 		writeSessionFile(tempDir, "fallback-project", "2026-04-02T13-55-08-857Z_session-a.jsonl", [
 			{ type: "session", cwd: "/Users/test/real-project" },
 			{ type: "message", timestamp: "2026-04-02T10:00:00.000Z", message: { role: "user", content: "hi" } },
 			{
 				type: "message",
+				id: "shared-msg-1",
 				timestamp: "2026-04-02T10:01:00.000Z",
 				message: {
 					role: "assistant",
@@ -53,10 +80,12 @@ describe("scanAllSessions", () => {
 			},
 		]);
 
-		writeSessionFile(tempDir, "fallback-project-2", "2026-04-02T13-56-08-857Z_session-b.jsonl", [
+		writeSessionFile(tempDir, "2026-04-02T13-55-08-857Z_session-a/abcd1234/run-0", "2026-04-02T13-56-08-857Z_nested-session.jsonl", [
+			{ type: "session", cwd: "/Users/test/nested-project" },
 			"not json",
 			{
 				type: "message",
+				id: "nested-msg-1",
 				timestamp: "2026-04-02T09:59:00.000Z",
 				message: {
 					role: "assistant",
@@ -72,7 +101,9 @@ describe("scanAllSessions", () => {
 				},
 			},
 			{
+				// duplicate of session-a assistant message copied into a branched subagent session
 				type: "message",
+				id: "shared-msg-1",
 				timestamp: "2026-04-02T10:01:00.000Z",
 				message: {
 					role: "assistant",
@@ -91,14 +122,19 @@ describe("scanAllSessions", () => {
 		]);
 
 		const records = scanAllSessions();
-		expect(records).toHaveLength(2);
+		expect(records).toHaveLength(3);
 		expect(records.map((r) => r.timestamp)).toEqual([
+			new Date("2026-04-02T09:58:00.000Z").getTime(),
 			new Date("2026-04-02T09:59:00.000Z").getTime(),
 			new Date("2026-04-02T10:01:00.000Z").getTime(),
 		]);
-		expect(records[1].project).toBe("/Users/test/real-project");
-		expect(records[1].sessionId).toBe("session-a");
-		expect(records[0].totalTokens).toBe(30);
+		expect(records[0].project).toBe("/Users/test/root-project");
+		expect(records[1].project).toBe("/Users/test/nested-project");
+		expect(records[2].project).toBe("/Users/test/real-project");
+		expect(records[2].sessionId).toBe("session-a");
+		expect(records[1].sessionId).toBe("nested-session");
+		expect(records[0].sessionId).toBe("root-session");
+		expect(records[1].totalTokens).toBe(30);
 	});
 
 	it("uses cache until refreshCachedRecords is called", () => {
