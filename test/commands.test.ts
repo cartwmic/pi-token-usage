@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UsageRecord } from "../src/types";
 
 const scanAllSessions = vi.fn<() => UsageRecord[]>();
@@ -41,17 +41,18 @@ describe("usage command rendering", () => {
 		refreshCachedRecords.mockReset();
 	});
 
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
 	it("keeps daily rows vertically aligned for very long model names", () => {
-		const baseTime = new Date();
-		baseTime.setDate(baseTime.getDate() - 1);
-		baseTime.setHours(10, 0, 0, 0);
-		const laterTime = new Date(baseTime.getTime() + 60 * 60 * 1000);
-		const dayLabel = baseTime.toISOString().slice(0, 10);
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-04-08T12:00:00.000Z"));
 
 		scanAllSessions.mockReturnValue([
 			record({
-				timestamp: baseTime.getTime(),
-				isoTimestamp: baseTime.toISOString(),
+				timestamp: new Date("2026-04-02T10:00:00.000Z").getTime(),
+				isoTimestamp: "2026-04-02T10:00:00.000Z",
 				provider: "openai-codex",
 				model: "gpt-5.4",
 				input: 4_800_000,
@@ -62,8 +63,8 @@ describe("usage command rendering", () => {
 				costTotal: 24.6,
 			}),
 			record({
-				timestamp: laterTime.getTime(),
-				isoTimestamp: laterTime.toISOString(),
+				timestamp: new Date("2026-04-02T11:00:00.000Z").getTime(),
+				isoTimestamp: "2026-04-02T11:00:00.000Z",
 				provider: "anthropic",
 				model: "claude-haiku-4-5-20251001",
 				input: 26,
@@ -77,7 +78,7 @@ describe("usage command rendering", () => {
 
 		const output = cmdUsageDays(7);
 		const lines = stripAnsi(output).split("\n");
-		const dayLine = lines.find((line) => line.includes(dayLabel));
+		const dayLine = lines.find((line) => line.includes("2026-04-02"));
 		const shortModelLine = lines.find((line) => line.includes("openai-codex/gpt-5.4"));
 		const longModelLine = lines.find((line) => line.includes("anthropic/claude-haiku-4-5-20251001"));
 

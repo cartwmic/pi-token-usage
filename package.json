@@ -1,6 +1,6 @@
 {
   "name": "pi-token-usage",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Pi extension for lifetime token usage tracking and cost analytics across all sessions",
   "keywords": [
     "pi",
@@ -36,7 +36,7 @@
     "test": "vitest run"
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": ">=0.55.0"
+    "@earendil-works/pi-coding-agent": "^0.75.3"
   },
   "devDependencies": {
     "vitest": "^3.1.1"
