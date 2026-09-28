@@ -67,6 +67,9 @@ def main():
     (project / ".pi-token-usage.json").write_text(json.dumps({"enabled": True, "items": ["totalTodayTokens"], "style": "plain"}))
     gate = home / "hold-import"; gate.touch()
     env = dict(os.environ, PI_CODING_AGENT_DIR=str(agent), PI_TOKEN_USAGE_TEST_GATE=str(gate), PI_TOKEN_USAGE_E2E_ARTIFACTS=str(captures), PI_OFFLINE="1", TERM="xterm-256color", COLUMNS="130", LINES="55")
+    # Proof capture workers may set this independently of PI_CODING_AGENT_DIR.
+    # The scripted Pi processes must persist into the fixture tree being indexed.
+    env.pop("PI_CODING_AGENT_SESSION_DIR", None)
     history = agent / "sessions" / "history" / "historical.jsonl"; history.parent.mkdir(parents=True)
     now = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".000Z"
     def charge(id_, input_, cwd="/historical"):
