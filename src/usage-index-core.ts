@@ -7,8 +7,7 @@ import type { UsageRecord } from "./types.ts";
 import { todayStart } from "./dates.ts";
 
 export const INDEX_NAME = "token-usage-index-v1.sqlite";
-const VERSION = 2;
-const PROBE_BYTES = 4096;
+const VERSION = 3;
 type Row = Record<string, any>;
 type FileVersion = { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number };
 type Charge = UsageRecord & { key: string; position: number };
@@ -26,17 +25,20 @@ function same(a: FileVersion, b: FileVersion): boolean {
 	return a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
 }
 function hash(value: unknown): string { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
-/** Bounded fingerprint of the indexed prefix; growth alone does not prove append. */
-function prefixFingerprint(path: string, size: number): string {
+/** A changed file may be appended only when every previously indexed byte still matches. */
+function prefixHasher(path: string, size: number, onRead?: (bytes: number) => void): ReturnType<typeof createHash> {
 	const fd = openSync(path, "r");
-	const digest = createHash("sha256").update(String(size) + ":");
+	const digest = createHash("sha256");
 	try {
-		for (const [position, length] of size <= PROBE_BYTES * 2 ? [[0, size]] : [[0, PROBE_BYTES], [size - PROBE_BYTES, PROBE_BYTES]]) {
-			const buffer = Buffer.allocUnsafe(length);
-			if (readSync(fd, buffer, 0, length, position) !== length) throw Error(`Short prefix read: ${path}`);
-			digest.update(buffer);
+		for (let position = 0; position < size;) {
+			const chunk = Buffer.allocUnsafe(Math.min(256 * 1024, size - position));
+			const n = readSync(fd, chunk, 0, chunk.length, position);
+			if (!n) throw Error(`Short prefix read: ${path}`);
+			digest.update(chunk.subarray(0, n));
+			onRead?.(n);
+			position += n;
 		}
-		return digest.digest("hex");
+		return digest;
 	} finally { closeSync(fd); }
 }
 export function chargeIdentity(entry: Row): string {
@@ -94,7 +96,7 @@ export class UsageIndexCore {
 				CREATE TABLE IF NOT EXISTS charges (path TEXT NOT NULL, position INTEGER NOT NULL, key TEXT NOT NULL, record TEXT NOT NULL, PRIMARY KEY(path,position), FOREIGN KEY(path) REFERENCES files(path) ON DELETE CASCADE);
 				CREATE INDEX IF NOT EXISTS charges_key ON charges(key);
 				CREATE TABLE IF NOT EXISTS pending (path TEXT NOT NULL, key TEXT NOT NULL, record TEXT NOT NULL, PRIMARY KEY(path,key));
-				PRAGMA user_version=2;`);
+				PRAGMA user_version=3;`);
 				return db;
 			} catch (e) { db.close(); throw e; }
 		};
@@ -136,7 +138,7 @@ export class UsageIndexCore {
 			else if (s.isFile() && item.endsWith(".jsonl")) found.push(path);
 		}
 	}
-	private *lines(path: string, offset: number, size: number): Generator<{ text: string; position: number; end: number }> {
+	private *lines(path: string, offset: number, size: number, onChunk?: (bytes: Buffer, position: number) => void): Generator<{ text: string; position: number; end: number }> {
 		const fd = openSync(path, "r");
 		const decoder = new TextDecoder("utf-8", { fatal: true });
 		let pending = Buffer.alloc(0);
@@ -147,6 +149,7 @@ export class UsageIndexCore {
 				const n = readSync(fd, chunk, 0, chunk.length, pos);
 				if (!n) throw Error(`Short read: ${path}`);
 				this.hooks.onBodyRead?.(path, n);
+				onChunk?.(chunk.subarray(0, n), pos);
 				pos += n;
 				const bytes = pending.length ? Buffer.concat([pending, chunk.subarray(0, n)]) : chunk.subarray(0, n);
 				let start = 0;
@@ -176,7 +179,10 @@ export class UsageIndexCore {
 		const stat = version(statSync(path));
 		const old = this.file(path);
 		if (old && same(stat, { dev: old.dev, ino: old.ino, size: old.size, mtimeMs: old.mtime, ctimeMs: old.ctime })) return old.offset === old.size;
-		const append = !!old && old.dev === stat.dev && old.ino === stat.ino && stat.size > old.size && stat.size >= old.offset && prefixFingerprint(path, old.size) === old.prefix;
+		const appendCandidate = !!old && old.dev === stat.dev && old.ino === stat.ino && stat.size > old.size && stat.size >= old.offset;
+		let digest = appendCandidate ? prefixHasher(path, old.size, (n) => this.hooks.onBodyRead?.(path, n)) : createHash("sha256");
+		const append = appendCandidate && digest.copy().digest("hex") === old.prefix;
+		if (!append) digest = createHash("sha256");
 		const start = append ? old.offset : 0;
 		let end = start;
 		const parts = relative(this.sessions, path).split(sep);
@@ -184,7 +190,12 @@ export class UsageIndexCore {
 		const session = extractSessionId(path);
 		const contexts = new Map<string, Context>();
 		const charges: Charge[] = [];
-		for (const { text: raw, position, end: lineEnd } of this.lines(path, start, stat.size)) {
+		for (const { text: raw, position, end: lineEnd } of this.lines(path, start, stat.size, (bytes, position) => {
+			// A partial prior line is parsed again, but its bytes are already in
+			// the verified prefix. Hash only the newly appended suffix.
+			const skip = append ? Math.max(0, old!.size - position) : 0;
+			if (skip < bytes.length) digest.update(bytes.subarray(skip));
+		})) {
 			end = lineEnd;
 			if (!raw.trim()) continue;
 			let entry: Row;
@@ -212,7 +223,7 @@ export class UsageIndexCore {
 				}
 			}
 		}
-		const prefix = prefixFingerprint(path, stat.size);
+		const prefix = digest.digest("hex");
 		if (!same(stat, version(statSync(path)))) throw Error(`Changed while reading: ${path}`);
 		await this.hooks.beforeImport?.(path);
 		let committed = false;

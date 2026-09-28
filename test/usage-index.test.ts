@@ -68,7 +68,7 @@ describe("shared derived usage index", () => {
 		expect(result).toMatchObject({ status: "complete", records: [] });
 	});
 
-	it("reads only appended bytes; second process, unchanged and deletion-only sweeps read no old bodies", async () => {
+	it("verifies a changed file's full prior prefix; unchanged and deletion-only sweeps read no old bodies", async () => {
 		const a = session(root, "p/a.jsonl", "/a", [entry("a", 1)]);
 		const b = session(root, "p/b.jsonl", "/b", [entry("b", 2)]);
 		const trace: Array<[string, number]> = [];
@@ -82,7 +82,7 @@ describe("shared derived usage index", () => {
 		add(a, entry("new", 3));
 		const appended = readFileSync(a).length - before;
 		expect((await second.reconcile()).records).toHaveLength(3);
-		expect(trace).toEqual([[a, appended]]);
+		expect(trace).toEqual([[a, before], [a, appended]]);
 		trace.length = 0; unlinkSync(b);
 		expect((await idx.reconcile()).records).toHaveLength(2);
 		expect(trace).toEqual([]);
@@ -117,12 +117,27 @@ describe("shared derived usage index", () => {
 		expect(statSync(a).ino).toBe(inode);
 		expect(statSync(a).size).toBeGreaterThan(previousSize);
 		expect(await b.reconcile()).toMatchObject({ status: "complete", records: [{ input: 4, project: "/replacement-with-a-longer-session-header" }, { input: 5 }] });
-		expect(trace.reduce((total, bytes) => total + bytes, 0)).toBe(statSync(a).size);
+		expect(trace.reduce((total, bytes) => total + bytes, 0)).toBe(previousSize + statSync(a).size);
 		trace.length = 0;
 		const beforeAppend = statSync(a).size;
 		add(a, entry("appended", 6));
 		expect((await b.reconcile()).records.map(r => r.input)).toEqual([4, 5, 6]);
-		expect(trace.reduce((total, bytes) => total + bytes, 0)).toBe(statSync(a).size - beforeAppend);
+		expect(trace.reduce((total, bytes) => total + bytes, 0)).toBe(statSync(a).size);
+	});
+
+	it("rebuilds a growing same-inode rewrite that changes only an unsampled middle charge", async () => {
+		const a = session(root, "a.jsonl", "/a", [
+			{ type: "custom", id: "pad-before", data: "x".repeat(5000) },
+			entry("middle", 11),
+			{ type: "custom", id: "pad-after", data: "y".repeat(5000) },
+		]);
+		const idx = open(root);
+		expect(await idx.reconcile()).toMatchObject({ status: "complete", records: [{ input: 11 }] });
+		const before = statSync(a);
+		writeFileSync(a, readFileSync(a, "utf8").replace('"input":11', '"input":44') + JSON.stringify(entry("tail", 3)) + "\n");
+		expect(statSync(a).ino).toBe(before.ino);
+		expect(statSync(a).size).toBeGreaterThan(before.size);
+		expect(await idx.reconcile()).toMatchObject({ status: "complete", records: [{ input: 44 }, { input: 3 }] });
 	});
 
 	it("retains indexed charges while the sessions root is absent, then recovers", async () => {
