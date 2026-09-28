@@ -199,6 +199,25 @@ describe("shared derived usage index", () => {
 		gate.release(); expect((await walk).records.map(r => r.input)).toEqual([9]);
 	});
 
+	it("an older successful walk cannot overwrite a newer malformed-source warning", async () => {
+		const file = session(root, "f.jsonl", "/f", [entry("valid", 1)]);
+		const deleted = session(root, "d.jsonl", "/d", [entry("deleted", 2)]);
+		const gate = deferred(); const entered = deferred();
+		const older = open(root, { beforeDelete: async (path) => { if (path === deleted) { entered.release(); await gate.gate; } } });
+		const newer = open(root);
+		expect((await older.reconcile()).status).toBe("complete");
+		unlinkSync(deleted);
+		const oldWalk = older.reconcile(); await entered.gate;
+		appendFileSync(file, "{malformed\n");
+		expect((await newer.reconcile()).status).toBe("incomplete");
+		gate.release();
+		expect((await oldWalk).status).toBe("incomplete");
+		expect(older.snapshot().status).toBe("incomplete");
+		session(root, "f.jsonl", "/f", [entry("valid", 1)]);
+		expect(await newer.reconcile()).toMatchObject({ status: "complete", records: [{ input: 1 }] });
+		expect((await older.reconcile()).status).toBe("complete");
+	});
+
 	it("stale same-file parsed import cannot overwrite a later append commit", async () => {
 		const a = session(root, "a.jsonl", "/a", [entry("one", 1)]);
 		const gate = deferred(); const entered = deferred();

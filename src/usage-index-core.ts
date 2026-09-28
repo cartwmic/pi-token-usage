@@ -283,12 +283,25 @@ export class UsageIndexCore {
 					}
 				}
 			}
-			this.db.prepare("INSERT INTO meta(key,value) VALUES('health','complete') ON CONFLICT(key) DO UPDATE SET value=excluded.value").run();
-			if (existsSync(this.sessions)) this.db.prepare("DELETE FROM meta WHERE key='rebuilding'").run();
-			this.warning = undefined;
+			const published = this.transaction(() => {
+				const failedAt = Number((this.db.prepare("SELECT value FROM meta WHERE key='health_failure_generation'").get() as Row | undefined)?.value ?? 0);
+				// A complete but older walk cannot erase a newer process's failed scan.
+				if (failedAt > startGeneration) return false;
+				this.db.prepare("INSERT INTO meta(key,value) VALUES('health','complete') ON CONFLICT(key) DO UPDATE SET value=excluded.value").run();
+				this.db.prepare("DELETE FROM meta WHERE key='health_failure_generation'").run();
+				if (existsSync(this.sessions)) this.db.prepare("DELETE FROM meta WHERE key='rebuilding'").run();
+				return true;
+			});
+			this.warning = published ? undefined : "Concurrent incomplete source snapshot; retry catch-up";
 		} catch (e) {
 			this.warning = String(e);
-			try { this.db.prepare("INSERT INTO meta(key,value) VALUES('health','incomplete') ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(); } catch { /* query will report the failure */ }
+			try {
+				this.transaction(() => {
+					const generation = this.nextGeneration();
+					this.db.prepare("INSERT INTO meta(key,value) VALUES('health_failure_generation',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(generation));
+					this.db.prepare("INSERT INTO meta(key,value) VALUES('health','incomplete') ON CONFLICT(key) DO UPDATE SET value=excluded.value").run();
+				});
+			} catch { /* query will report the failure */ }
 		}
 		return todayOnly ? this.today() : this.snapshot();
 	}
