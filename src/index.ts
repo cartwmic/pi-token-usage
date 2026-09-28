@@ -7,11 +7,8 @@ import {
 	cmdUsageProjects,
 	cmdUsageSessions,
 	cmdUsageSummary,
-	refreshUsageData,
 } from "./commands";
 import {
-	applyFooterTheme,
-	buildFooterStatus,
 	FOOTER_PRESETS,
 	formatFooterConfig,
 	formatFooterTemplateVars,
@@ -23,7 +20,7 @@ import {
 	saveProjectFooterConfig,
 	writeProjectFooterConfig,
 } from "./footer";
-import { refreshCachedRecords, scanAllSessions } from "./scan";
+import { createUsageAdapter, usageWarning } from "./usage-adapter";
 
 /**
  * pi-token-usage — Lifetime token usage tracking and cost analytics
@@ -38,21 +35,10 @@ import { refreshCachedRecords, scanAllSessions } from "./scan";
  *   /usage footer       — Show or customize footer status
  *   /usage refresh      — Force rescan
  */
-export default function (pi: ExtensionAPI) {
-	const updateFooterStatus = (ctx: any) => {
-		refreshCachedRecords();
-		const config = loadFooterConfig(ctx.cwd);
-		const status = buildFooterStatus(scanAllSessions(), ctx.cwd, config);
-		ctx.ui.setStatus("token-usage", status ? applyFooterTheme(status, config.style, ctx.ui.theme) : undefined);
-	};
-
-	pi.on("session_start", async (_event, ctx) => {
-		updateFooterStatus(ctx);
-	});
-
-	pi.on("turn_end", async (_event, ctx) => {
-		updateFooterStatus(ctx);
-	});
+export function registerUsage(pi: ExtensionAPI, adapter = createUsageAdapter()) {
+	pi.on("session_start", (_event, ctx) => { adapter.start(ctx); });
+	pi.on("turn_end", (event, ctx) => { adapter.onTurn(event, ctx); });
+	pi.on("session_shutdown", () => { adapter.shutdown(); });
 
 	pi.registerCommand("usage", {
 		description: "Token usage analytics — lifetime, by model, day, month, session, project",
@@ -60,6 +46,11 @@ export default function (pi: ExtensionAPI) {
 			const trimmed = (args ?? "").trim();
 			const parts = trimmed.length > 0 ? trimmed.split(/\s+/) : [];
 			const sub = parts[0]?.toLowerCase();
+			// Help and footer settings do not depend on historical usage. They must
+			// remain responsive even while the first backfill is still running.
+			const snapshot = sub === "help" || sub === "?" || sub === "--help" || sub === "footer"
+				? undefined : await adapter.catchUp();
+			const records = snapshot?.records ?? [];
 
 			let output: string;
 
@@ -70,23 +61,23 @@ export default function (pi: ExtensionAPI) {
 					output = cmdUsageHelp();
 					break;
 				case "models":
-					output = cmdUsageModels();
+					output = cmdUsageModels(records);
 					break;
 				case "days": {
 					const n = parseInt(parts[1]) || 7;
-					output = cmdUsageDays(n);
+					output = cmdUsageDays(n, records);
 					break;
 				}
 				case "months":
-					output = cmdUsageMonths();
+					output = cmdUsageMonths(records);
 					break;
 				case "sessions": {
 					const n = parseInt(parts[1]) || 20;
-					output = cmdUsageSessions(n);
+					output = cmdUsageSessions(n, records);
 					break;
 				}
 				case "projects":
-					output = cmdUsageProjects();
+					output = cmdUsageProjects(records);
 					break;
 				case "footer": {
 					const action = parts[1]?.toLowerCase();
@@ -172,20 +163,22 @@ export default function (pi: ExtensionAPI) {
 					} catch (error) {
 						output = error instanceof Error ? error.message : String(error);
 					}
-					updateFooterStatus(ctx);
+					adapter.render();
 					break;
 				}
 				case "refresh":
-					output = refreshUsageData();
-					ctx.ui.notify("Cache cleared and data rescanned.", "info");
-					updateFooterStatus(ctx);
+					output = cmdUsageSummary(records);
+					ctx.ui.notify(snapshot?.status === "complete" ? "Usage index reconciled." : "Usage index catch-up incomplete.", "info");
+					adapter.render();
 					break;
 				default:
-					output = cmdUsageSummary();
+					output = cmdUsageSummary(records);
 					break;
 			}
 
-			ctx.ui.notify(output, "info");
+			ctx.ui.notify((snapshot ? usageWarning(snapshot) : "") + output, "info");
 		},
 	});
 }
+
+export default registerUsage;

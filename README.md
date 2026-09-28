@@ -17,21 +17,15 @@ Pi already shows token usage per session. `pi-token-usage` adds a cross-session 
 - **Per-session breakdown** — top sessions by cost
 - **Live footer status** — today's project and total consumption in the footer
 - **Customizable footer** — enable/disable it, choose metrics, style, separators, presets, or a full template override
-- **Fast refresh** — clear cached scan results and rescan session files
+- **Shared incremental index** — reconcile new/changed JSONL in a worker; unchanged transcript bodies are not reread
 - **Simple commands** — query usage directly from pi with `/usage ...`
 
 ## Install
 
-From npm:
+Install this fork (not the upstream npm package) with Pi `^0.87.1`:
 
 ```bash
-pi install npm:pi-token-usage
-```
-
-Or from git:
-
-```bash
-pi install git:github.com/ladislas/pi-token-usage
+pi install git:github.com/cartwmic/pi-token-usage
 ```
 
 ## Commands
@@ -53,7 +47,7 @@ pi install git:github.com/ladislas/pi-token-usage
 /usage footer untemplate          — remove the footer template override
 /usage footer vars                — show available template variables
 /usage footer reset               — remove project footer config
-/usage refresh         — clear cache and rescan session files
+/usage refresh         — reconcile the current session tree now (bounded wait)
 /usage help            — show command help
 ```
 
@@ -159,26 +153,30 @@ A global default config can also be placed at:
 
 ## How it works
 
-Pi stores session history as JSONL files under `~/.pi/agent/sessions/`. Assistant messages include token usage and cost metadata. This extension scans those session files, extracts usage records, and aggregates them across multiple dimensions.
+Pi's retained JSONL files under the active agent directory's `sessions/` tree are the source of truth (including nested child sessions). A worker incrementally reconciles recorded assistant, tool-result, standalone, compaction and branch-summary usage into a **derived**, rebuildable SQLite index at `<agent-dir>/token-usage-index-v1.sqlite`. It records file checkpoints/provenance and usage fields, not transcript content. Copied work counts once; unrelated entries sharing a short ID remain distinct. Sessions and projects use each canonical charge's source file and recorded cwd. Built-in compaction uses the selected branch model where known, otherwise appears under `unattributed` without dropping its tokens or cost. Day/month views use local calendar time.
 
-No external database or persistence file is required — your local pi session files are the source of truth.
+A turn updates this window's footer immediately from a local overlay; worker writes, first backfill and metadata sweeps never block turn settlement. Other processes and child sessions reach an idle window on its periodic ~50-second sweep, not synchronously. A new window reuses the shared index. Loading, stale and incomplete views carry a visible warning rather than pretending partial totals are complete. Explicit `/usage` and `/usage refresh` attempt reconciliation with a 2.5-second bound; a timeout visibly warns that totals may be partial. Refresh does not force a full reread of unchanged files.
+
+The index is disposable: stop Pi processes, remove `token-usage-index-v1.sqlite` and its `-wal`/`-shm` companions from the active agent directory, then start Pi and allow its JSONL backfill to finish. Keep the session JSONL files; deleting them removes their usage after a successful reconciliation.
 
 ## Notes
 
 - Data stays local; no external service is used
 - Results depend on usage metadata being present in pi session files
-- The first scan may take longer if you have a large session history
-- `/usage refresh` clears the in-memory cache and rescans all session files
+- Initial backfill may take time for a large session history; explicit commands warn if the catch-up bound expires
+- The current agent directory only is indexed; archive directories, arbitrary `--session-dir` roots and ephemeral sessions without JSONL are not included
+- This change was exercised on the personal machine with Pi 0.87.1, not on axon-work-computer; smoke-test the work host before deploying there
 
 ## Requirements
 
-- [pi](https://github.com/badlogic/pi-mono) v0.55.0 or later
+- [Pi](https://github.com/badlogic/pi-mono) `^0.87.1` (Node with `node:sqlite` and worker-thread TypeScript support)
 
 ## Development
 
 ```bash
-npm install
+npm ci
 npm test
+npm run test:e2e  # real interactive Pi, Python 3 stdlib PTY and local scripted faux provider; no live API
 ```
 
 ## License

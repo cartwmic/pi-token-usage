@@ -4,10 +4,10 @@ import { daysAgo, toDateStr, toMonthStr, todayStart } from "./dates";
 import { colorCost, fmtTokens, pad, padL, visibleWidth } from "./format";
 import { projectShortName } from "./paths";
 import { refreshCachedRecords, scanAllSessions } from "./scan";
+import type { UsageRecord } from "./types";
 import { computeWidths, renderHeader, renderModelBreakdown, renderTotalsLine } from "./tables";
 
-export function cmdUsageSummary(): string {
-	const records = scanAllSessions();
+export function cmdUsageSummary(records: UsageRecord[] = scanAllSessions()): string {
 	if (records.length === 0) {
 		return "No usage data found. Make sure you have pi sessions in ~/.pi/agent/sessions/";
 	}
@@ -79,8 +79,7 @@ export function cmdUsageSummary(): string {
 	return lines.join("\n");
 }
 
-export function cmdUsageModels(): string {
-	const records = scanAllSessions();
+export function cmdUsageModels(records: UsageRecord[] = scanAllSessions()): string {
 	if (records.length === 0) return "No usage data found.";
 
 	const byModel = aggregateByKey(records, (r) => `${r.provider}/${r.model}`);
@@ -132,8 +131,7 @@ export function cmdUsageModels(): string {
 	return lines.join("\n");
 }
 
-export function cmdUsageDays(n: number): string {
-	const records = scanAllSessions();
+export function cmdUsageDays(n: number, records: UsageRecord[] = scanAllSessions()): string {
 	if (records.length === 0) return "No usage data found.";
 
 	const recent = filterSince(records, daysAgo(n));
@@ -170,8 +168,7 @@ export function cmdUsageDays(n: number): string {
 	return lines.join("\n");
 }
 
-export function cmdUsageMonths(): string {
-	const records = scanAllSessions();
+export function cmdUsageMonths(records: UsageRecord[] = scanAllSessions()): string {
 	if (records.length === 0) return "No usage data found.";
 
 	const byMonth = aggregateByKey(records, (r) => toMonthStr(r.timestamp));
@@ -205,8 +202,7 @@ export function cmdUsageMonths(): string {
 	return lines.join("\n");
 }
 
-export function cmdUsageSessions(n: number): string {
-	const records = scanAllSessions();
+export function cmdUsageSessions(n: number, records: UsageRecord[] = scanAllSessions()): string {
 	if (records.length === 0) return "No usage data found.";
 
 	const bySession = aggregateByKey(records, (r) => r.sessionId);
@@ -259,8 +255,7 @@ export function cmdUsageSessions(n: number): string {
 	return lines.join("\n");
 }
 
-export function cmdUsageProjects(): string {
-	const records = scanAllSessions();
+export function cmdUsageProjects(records: UsageRecord[] = scanAllSessions()): string {
 	if (records.length === 0) return "No usage data found.";
 
 	const byProject = aggregateByKey(records, (r) => r.project);

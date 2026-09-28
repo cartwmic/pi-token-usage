@@ -33,12 +33,14 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "python3 test/e2e.py"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.75.3"
+    "@earendil-works/pi-coding-agent": "^0.87.1"
   },
   "devDependencies": {
+    "@earendil-works/pi-ai": "^0.87.1",
     "vitest": "^3.1.1"
   }
 }
