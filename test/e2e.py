@@ -10,7 +10,9 @@ import signal
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timedelta, timezone, time as datetime_time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent.parent
 ANSI = re.compile(rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-_])")
@@ -66,7 +68,7 @@ def main():
     project = home / "project"; project.mkdir()
     (project / ".pi-token-usage.json").write_text(json.dumps({"enabled": True, "items": ["totalTodayTokens"], "style": "plain"}))
     gate = home / "hold-import"; gate.touch()
-    env = dict(os.environ, PI_CODING_AGENT_DIR=str(agent), PI_TOKEN_USAGE_TEST_GATE=str(gate), PI_TOKEN_USAGE_E2E_ARTIFACTS=str(captures), PI_OFFLINE="1", TERM="xterm-256color", COLUMNS="130", LINES="55")
+    env = dict(os.environ, PI_CODING_AGENT_DIR=str(agent), PI_TOKEN_USAGE_TEST_GATE=str(gate), PI_TOKEN_USAGE_E2E_ARTIFACTS=str(captures), PI_OFFLINE="1", TERM="xterm-256color", TZ="America/Los_Angeles", COLUMNS="130", LINES="55")
     # Proof capture workers may set this independently of PI_CODING_AGENT_DIR.
     # The scripted Pi processes must persist into the fixture tree being indexed.
     env.pop("PI_CODING_AGENT_SESSION_DIR", None)
@@ -158,13 +160,81 @@ def main():
         check_clean(second.text())
         print("PASS idle child update under 60s, copied charge reassignment, last-source removal and child attribution")
         second.stop(); processes.remove(second)
-        restarted = Pi({k:v for k,v in env.items() if k != "PI_TOKEN_USAGE_TEST_GATE"}, project, "restarted"); processes.append(restarted)
+        restart_trace = home / "restart-body-reads.jsonl"
+        restart_env = {k:v for k,v in env.items() if k != "PI_TOKEN_USAGE_TEST_GATE"}
+        restart_env["PI_TOKEN_USAGE_TEST_READ_TRACE"] = str(restart_trace)
+        restarted = Pi(restart_env, project, "restarted"); processes.append(restarted)
         restarted.wait(r"Total today[^\r\n]*\b4\.[0-9][kK] tok\b", 20)
         at = restarted.send("/usage")
         restarted.wait(r"2 messages across 2 sessions", 10, at)
         assert "stale/incomplete" not in restarted.text()[at:], "restarted process did not reuse complete shared index"
+        assert not restart_trace.exists() or not restart_trace.read_text(), "restart reread unchanged transcript bodies"
         check_clean(restarted.text())
-        print("PASS stopped Pi process restarts against retained shared index")
+        print("PASS stopped Pi process reuses index without unchanged-body reads")
+
+        def usage(input_, cost):
+            return {"input":input_, "output":0, "cacheRead":0, "cacheWrite":0,
+                    "totalTokens":input_, "cost":{"total":cost}}
+        stamp = int(time.time() * 1000)
+        mixed_entries = [
+            {"type":"model_change", "id":"selected-model", "parentId":None,
+             "timestamp":now, "provider":"openai", "modelId":"gpt-script"},
+            {"type":"message", "id":"assistant-mixed", "parentId":"selected-model", "timestamp":now,
+             "message":{"role":"assistant", "provider":"openai", "model":"gpt-script",
+                        "timestamp":stamp, "usage":usage(10, .15)}},
+            {"type":"message", "id":"tool-mixed", "parentId":"assistant-mixed", "timestamp":now,
+             "message":{"role":"toolResult", "timestamp":stamp, "usage":usage(20, .20)}},
+            {"type":"usage", "id":"standalone-mixed", "parentId":"tool-mixed", "timestamp":now,
+             "kind":"scripted", "provider":"anthropic", "model":"standalone-model", "usage":usage(30, .30)},
+            {"type":"compaction", "id":"compaction-mixed", "parentId":"tool-mixed", "timestamp":now,
+             "summary":"fixture", "firstKeptEntryId":"tool-mixed", "tokensBefore":100,
+             "usage":usage(40, .40)},
+            {"type":"branch_summary", "id":"branch-mixed", "parentId":"compaction-mixed", "timestamp":now,
+             "fromId":"tool-mixed", "summary":"fixture", "usage":usage(50, .50)},
+            {"type":"compaction", "id":"unattributed-mixed", "parentId":None, "timestamp":now,
+             "summary":"fixture", "firstKeptEntryId":"tool-mixed", "tokensBefore":100,
+             "usage":usage(60, .60)},
+        ]
+        mixed = agent / "sessions" / "history" / "mixed.jsonl"
+        copied = agent / "sessions" / "history" / "child" / "mixed-copy.jsonl"
+        source(mixed, "/mixed-project", mixed_entries)
+        source(copied, "/copied-project", mixed_entries)
+        local_zone = ZoneInfo("America/Los_Angeles")
+        current_month = datetime.now(local_zone).date().replace(day=1)
+        prior_month = (current_month - timedelta(days=1)).replace(day=1)
+        boundary = datetime.combine(prior_month, datetime_time.min, tzinfo=local_zone)
+        before, after = (boundary - timedelta(minutes=1)).astimezone(timezone.utc), (boundary + timedelta(minutes=1)).astimezone(timezone.utc)
+        def calendar_charge(id_, when, cost):
+            result = charge(id_, 1)
+            result["timestamp"] = when.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            result["message"].update(provider="openai", model="calendar", timestamp=int(when.timestamp()*1000), usage=usage(1, cost))
+            return result
+        source(agent / "sessions" / "history" / "calendar.jsonl", "/calendar",
+               [calendar_charge("before-midnight", before, .01), calendar_charge("after-midnight", after, .02)])
+        at = restarted.send("/usage refresh")
+        restarted.wait(r"Lifetime[^\r\n]*\$2\.18\b", 12, at)
+        assert "stale/incomplete" not in restarted.text()[at:]
+        at = restarted.send("/usage models")
+        for model, amount in [("openai/gpt-script", "1.25"), ("anthropic/standalone-model", "0.30"), ("unattributed/unattributed", "0.60")]:
+            restarted.wait(re.escape(model) + r"[^\r\n]*\$" + amount.replace(".", r"\.") + r"\b", 10, at)
+        at = restarted.send("/usage days 90")
+        for when, amount in [(before, "0.01"), (after, "0.02")]:
+            restarted.wait(re.escape(when.astimezone(local_zone).strftime("%Y-%m-%d")) + r"[^\r\n]*\$" + amount.replace(".", r"\.") + r"\b", 10, at)
+        at = restarted.send("/usage months")
+        for when, amount in [(before, "0.01"), (after, "0.02")]:
+            restarted.wait(re.escape(when.astimezone(local_zone).strftime("%Y-%m")) + r"[^\r\n]*\$" + amount.replace(".", r"\.") + r"\b", 10, at)
+        at = restarted.send("/usage sessions 20")
+        restarted.wait(r"\bmixed[^\r\n]*\$2\.15[^\r\n]*\b6\b", 10, at)
+        assert "mixed-copy" not in restarted.text()[at:], "copied charges appeared in a second session row"
+        at = restarted.send("/usage footer items totalTodayCost")
+        restarted.wait(r"Footer items updated", 8, at)
+        restarted.wait(r"Total today[^\r\n]*\$2\.15\b", 8, at)
+        at = restarted.send("/usage footer template [{totalToday.cost}]")
+        restarted.wait(r"Footer template updated", 8, at)
+        restarted.wait(r"\[\$2\.15\]", 8, at)
+        assert restart_trace.exists() and any("mixed.jsonl" in line for line in restart_trace.read_text().splitlines()), "worker body-read trace never exercised"
+        check_clean(restarted.text())
+        print("PASS real Pi non-assistant cost/model attribution, day/month buckets, additive sessions and footer settings")
         print(f"Captures: {captures}; sessions/index: {agent}")
     finally:
         gate.unlink(missing_ok=True)

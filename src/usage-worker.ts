@@ -1,9 +1,12 @@
 import { parentPort, workerData } from "node:worker_threads";
-import { existsSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import { UsageIndexCore, type EventCharge } from "./usage-index-core.ts";
 
-const index = new UsageIndexCore(workerData.agentRoot);
+const readTrace = process.env.PI_TOKEN_USAGE_TEST_READ_TRACE;
+const index = new UsageIndexCore(workerData.agentRoot, readTrace ? {
+	onBodyRead: (path, bytes) => appendFileSync(readTrace, `${JSON.stringify({ path, bytes })}\n`),
+} : {});
 let queue = Promise.resolve();
 parentPort!.on("message", ({ id, action, charges }: { id: number; action: string; charges?: EventCharge[] }) => {
 	queue = queue.then(async () => {
