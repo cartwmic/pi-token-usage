@@ -29,10 +29,12 @@ function hash(value: unknown): string { return createHash("sha256").update(JSON.
 function prefixHasher(path: string, size: number, onRead?: (bytes: number) => void): ReturnType<typeof createHash> {
 	const fd = openSync(path, "r");
 	const digest = createHash("sha256");
+	// One buffer for the whole verification: a long session file used to allocate one 256 KiB buffer per chunk on every sweep.
+	const chunk = Buffer.allocUnsafe(256 * 1024);
 	try {
 		for (let position = 0; position < size;) {
-			const chunk = Buffer.allocUnsafe(Math.min(256 * 1024, size - position));
-			const n = readSync(fd, chunk, 0, chunk.length, position);
+			const want = Math.min(chunk.length, size - position);
+			const n = readSync(fd, chunk, 0, want, position);
 			if (!n) throw Error(`Short prefix read: ${path}`);
 			digest.update(chunk.subarray(0, n));
 			onRead?.(n);
